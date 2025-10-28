@@ -5,10 +5,13 @@
  */
 
 import { CursorDB } from './cursor-db.js';
+import { ClaudeCodeDB } from './claude-code-db.js';
 import { MetadataDB } from './metadata-db.js';
 import { getCursorDBPath, getMetadataDBPath } from './platform.js';
 import { parseBubbles, type ParseOptions } from './message-parser.js';
 import { getWorkspaceInfo, extractWorkspaceFromComposerData, getProjectName, isEmptySession } from './workspace-extractor.js';
+import { getClaudeWorkspaceInfo } from './claude-workspace-extractor.js';
+import { claudeToUnified } from './format-adapters.js';
 import { SessionNotFoundError } from './errors.js';
 import type { 
   SessionMetadata, 
@@ -33,6 +36,8 @@ export interface ListSessionsOptions {
   sortBy?: 'newest' | 'oldest' | 'most_messages';
   /** Force sync before listing (default: auto-sync if >5min stale) */
   syncFirst?: boolean;
+  /** Filter by source (cursor, claude, or all) */
+  source?: 'cursor' | 'claude' | 'all';
 }
 
 /**
@@ -63,11 +68,12 @@ export interface GetSessionOptions {
 
 /**
  * Main API for Cursor Context Retrieval
- * 
- * High-level interface that orchestrates CursorDB and MetadataDB
+ *
+ * High-level interface that orchestrates CursorDB, ClaudeCodeDB and MetadataDB
  */
 export class CursorContext {
   private cursorDB: CursorDB;
+  private claudeCodeDB: ClaudeCodeDB;
   private metadataDB: MetadataDB;
   private autoSync: boolean;
   private autoSyncLimit: number;
@@ -81,14 +87,17 @@ export class CursorContext {
    * @param metadataDBPath - Path to metadata database (default: ~/.cursor-context/metadata.db)
    * @param autoSync - Automatically sync metadata when accessing sessions (default: true)
    * @param autoSyncLimit - Maximum number of sessions to check during auto-sync (default: 100000)
+   * @param claudeProjectsPath - Path to Claude Code projects (default: ~/.claude/projects)
    */
   constructor(
     cursorDBPath?: string,
     metadataDBPath?: string,
     autoSync = true,
-    autoSyncLimit = 100000
+    autoSyncLimit = 100000,
+    claudeProjectsPath?: string
   ) {
     this.cursorDB = new CursorDB(cursorDBPath || getCursorDBPath());
+    this.claudeCodeDB = new ClaudeCodeDB(claudeProjectsPath);
     this.metadataDB = new MetadataDB(metadataDBPath || getMetadataDBPath());
     this.autoSync = autoSync;
     this.autoSyncLimit = autoSyncLimit;
@@ -112,12 +121,13 @@ export class CursorContext {
       limit,
       tag,
       sortBy = 'newest',
-      syncFirst = false
+      syncFirst = false,
+      source = 'all'
     } = options;
 
     // Auto-sync if requested OR if data is stale
     if (this.autoSync && (syncFirst || this.isStale())) {
-      await this.syncSessions(this.autoSyncLimit);
+      await this.syncSessions(this.autoSyncLimit, source);
     }
 
     // If filtering by tag, use tag-based query
@@ -129,6 +139,9 @@ export class CursorContext {
       if (projectPath) {
         filtered = filtered.filter(s => s.project_path === projectPath);
       }
+      if (source !== 'all') {
+        filtered = filtered.filter(s => s.source === source);
+      }
 
       return this.sortAndLimit(filtered, sortBy, limit);
     }
@@ -137,12 +150,15 @@ export class CursorContext {
     if (projectPath) {
       const sessions = this.metadataDB.listSessionsByProject(projectPath);
 
+      let filtered = sessions;
       if (taggedOnly) {
-        const filtered = sessions.filter(s => s.tags && s.tags.length > 0);
-        return this.sortAndLimit(filtered, sortBy, limit);
+        filtered = filtered.filter(s => s.tags && s.tags.length > 0);
+      }
+      if (source !== 'all') {
+        filtered = filtered.filter(s => s.source === source);
       }
 
-      return this.sortAndLimit(sessions, sortBy, limit);
+      return this.sortAndLimit(filtered, sortBy, limit);
     }
 
     // General listing with optional filters
@@ -151,7 +167,13 @@ export class CursorContext {
       limit
     });
 
-    return this.sortAndLimit(sessions, sortBy, limit);
+    // Filter by source if needed
+    let filtered = sessions;
+    if (source !== 'all') {
+      filtered = filtered.filter(s => s.source === source);
+    }
+
+    return this.sortAndLimit(filtered, sortBy, limit);
   }
 
   /**
@@ -169,7 +191,7 @@ export class CursorContext {
     // Try to get by nickname first
     let metadata = this.metadataDB.getSessionByNickname(idOrNickname);
 
-    // If not found, try by exact ID
+    // If not found, try by exact ID (with prefix)
     if (!metadata) {
       metadata = this.metadataDB.getSessionMetadata(idOrNickname);
     }
@@ -179,9 +201,14 @@ export class CursorContext {
       metadata = this.metadataDB.findSessionByIdPrefix(idOrNickname);
     }
 
+    // If not found, try adding cursor: prefix
+    if (!metadata && !idOrNickname.includes(':')) {
+      metadata = this.metadataDB.getSessionMetadata(`cursor:${idOrNickname}`);
+    }
+
     // If still not found and autoSync is enabled, try to fetch from Cursor DB
-    if (!metadata && this.autoSync) {
-      metadata = await this.syncSession(idOrNickname);
+    if (!metadata && this.autoSync && !idOrNickname.includes(':')) {
+      metadata = await this.syncCursorSession(idOrNickname);
     }
 
     // If still not found, throw error
@@ -193,8 +220,22 @@ export class CursorContext {
     let messages: ParsedMessage[] = [];
 
     if (includeMessages) {
-      const bubbles = this.cursorDB.getSessionBubbles(metadata.session_id);
-      messages = parseBubbles(bubbles, parseOptions);
+      // Strip prefix to get raw session ID
+      const parts = metadata.session_id.split(':');
+      const source = parts[0];
+      const rawId = parts[1];
+
+      if (!rawId) {
+        throw new Error(`Invalid session ID format: ${metadata.session_id}`);
+      }
+
+      if (source === 'cursor') {
+        const bubbles = this.cursorDB.getSessionBubbles(rawId);
+        messages = parseBubbles(bubbles, parseOptions);
+      } else if (source === 'claude') {
+        const claudeMessages = this.claudeCodeDB.getSessionMessages(rawId);
+        messages = claudeToUnified(claudeMessages);
+      }
     }
 
     return {
@@ -276,43 +317,103 @@ export class CursorContext {
    * Set a nickname for a session
    */
   async setNickname(sessionId: string, nickname: string): Promise<void> {
-    // Check if session exists in Cursor DB
-    const composerData = this.cursorDB.getComposerData(sessionId);
-    if (!composerData) {
-      throw new SessionNotFoundError(sessionId);
+    // Determine source from prefix or default to cursor
+    let prefixedId = sessionId;
+    let rawId = sessionId;
+    let source: 'cursor' | 'claude' = 'cursor';
+
+    if (sessionId.includes(':')) {
+      [source, rawId] = sessionId.split(':') as ['cursor' | 'claude', string];
+      prefixedId = sessionId;
+    } else {
+      // No prefix, default to cursor
+      prefixedId = `cursor:${sessionId}`;
+      rawId = sessionId;
+      source = 'cursor';
     }
 
-    // If autoSync and no metadata exists, sync first
-    if (this.autoSync) {
-      const existing = this.metadataDB.getSessionMetadata(sessionId);
-      if (!existing) {
-        await this.syncSession(sessionId);
+    // Check if session exists in the appropriate DB
+    if (source === 'cursor') {
+      const composerData = this.cursorDB.getComposerData(rawId);
+      if (!composerData) {
+        throw new SessionNotFoundError(sessionId);
+      }
+
+      // If autoSync and no metadata exists, sync first
+      if (this.autoSync) {
+        const existing = this.metadataDB.getSessionMetadata(prefixedId);
+        if (!existing) {
+          await this.syncCursorSession(rawId);
+        }
+      }
+    } else if (source === 'claude') {
+      const messages = this.claudeCodeDB.getSessionMessages(rawId);
+      if (!messages || messages.length === 0) {
+        throw new SessionNotFoundError(sessionId);
+      }
+
+      // If autoSync and no metadata exists, sync first
+      if (this.autoSync) {
+        const existing = this.metadataDB.getSessionMetadata(prefixedId);
+        if (!existing) {
+          await this.syncClaudeSession(rawId);
+        }
       }
     }
 
-    // Set the nickname
-    this.metadataDB.setNickname(sessionId, nickname);
+    // Set the nickname (use prefixed ID)
+    this.metadataDB.setNickname(prefixedId, nickname);
   }
 
   /**
    * Add a tag to a session
    */
   async addTag(sessionId: string, tag: string): Promise<void> {
-    // Check if session exists
-    const composerData = this.cursorDB.getComposerData(sessionId);
-    if (!composerData) {
-      throw new SessionNotFoundError(sessionId);
+    // Determine source from prefix or default to cursor
+    let prefixedId = sessionId;
+    let rawId = sessionId;
+    let source: 'cursor' | 'claude' = 'cursor';
+
+    if (sessionId.includes(':')) {
+      [source, rawId] = sessionId.split(':') as ['cursor' | 'claude', string];
+      prefixedId = sessionId;
+    } else {
+      // No prefix, default to cursor
+      prefixedId = `cursor:${sessionId}`;
+      rawId = sessionId;
+      source = 'cursor';
     }
 
-    // If autoSync and no metadata exists, sync first
-    if (this.autoSync) {
-      const existing = this.metadataDB.getSessionMetadata(sessionId);
-      if (!existing) {
-        await this.syncSession(sessionId);
+    // Check if session exists in the appropriate DB
+    if (source === 'cursor') {
+      const composerData = this.cursorDB.getComposerData(rawId);
+      if (!composerData) {
+        throw new SessionNotFoundError(sessionId);
+      }
+
+      // If autoSync and no metadata exists, sync first
+      if (this.autoSync) {
+        const existing = this.metadataDB.getSessionMetadata(prefixedId);
+        if (!existing) {
+          await this.syncCursorSession(rawId);
+        }
+      }
+    } else if (source === 'claude') {
+      const messages = this.claudeCodeDB.getSessionMessages(rawId);
+      if (!messages || messages.length === 0) {
+        throw new SessionNotFoundError(sessionId);
+      }
+
+      // If autoSync and no metadata exists, sync first
+      if (this.autoSync) {
+        const existing = this.metadataDB.getSessionMetadata(prefixedId);
+        if (!existing) {
+          await this.syncClaudeSession(rawId);
+        }
       }
     }
 
-    this.metadataDB.addTag(sessionId, tag);
+    this.metadataDB.addTag(prefixedId, tag);
   }
 
   /**
@@ -355,11 +456,11 @@ export class CursorContext {
   }
 
   /**
-   * Sync a session from Cursor DB to Metadata DB
-   * 
+   * Sync a Cursor session from Cursor DB to Metadata DB
+   *
    * @internal
    */
-  private async syncSession(sessionId: string): Promise<SessionMetadata | null> {
+  private async syncCursorSession(sessionId: string): Promise<SessionMetadata | null> {
     try {
       const composerData = this.cursorDB.getComposerData(sessionId);
       if (!composerData) {
@@ -385,14 +486,60 @@ export class CursorContext {
       const firstUserMsg = messages.find(m => m.role === 'user')?.content || '';
 
       const metadata: SessionMetadata = {
-        session_id: sessionId,
+        session_id: `cursor:${sessionId}`,
+        source: 'cursor',
         nickname: workspaceInfo.nickname || undefined,
         project_path: workspacePath,
         project_name: workspacePath ? getProjectName(workspacePath) : undefined,
         has_project: !!workspacePath,
         first_message_preview: firstUserMsg.substring(0, 200),
         message_count: messages.length,
-        created_at: composerData.createdAt ? Date.parse(composerData.createdAt) : undefined
+        created_at: composerData.createdAt ? Date.parse(composerData.createdAt) : undefined,
+        last_synced_at: Date.now()
+      };
+
+      this.metadataDB.upsertSessionMetadata(metadata);
+      return metadata;
+    } catch (error) {
+      // Sync failed, return null
+      return null;
+    }
+  }
+
+  /**
+   * Sync a Claude Code session to Metadata DB
+   *
+   * @internal
+   */
+  private async syncClaudeSession(sessionId: string): Promise<SessionMetadata | null> {
+    try {
+      const messages = this.claudeCodeDB.getSessionMessages(sessionId);
+      if (!messages || messages.length === 0) {
+        return null;
+      }
+
+      // Extract workspace and nickname
+      const workspaceInfo = getClaudeWorkspaceInfo(messages);
+      const unified = claudeToUnified(messages);
+
+      const firstUserMsg = unified.find(m => m.role === 'user')?.content || '';
+
+      // Get created timestamp from first message
+      const createdAt = messages[0]?.timestamp
+        ? new Date(messages[0].timestamp).getTime()
+        : undefined;
+
+      const metadata: SessionMetadata = {
+        session_id: `claude:${sessionId}`,
+        source: 'claude',
+        nickname: workspaceInfo.nickname || undefined,
+        project_path: workspaceInfo.primaryPath || undefined,
+        project_name: workspaceInfo.primaryPath ? getProjectName(workspaceInfo.primaryPath) : undefined,
+        has_project: !!workspaceInfo.primaryPath,
+        first_message_preview: firstUserMsg.substring(0, 200),
+        message_count: unified.length,
+        created_at: createdAt,
+        last_synced_at: Date.now()
       };
 
       this.metadataDB.upsertSessionMetadata(metadata);
@@ -407,31 +554,73 @@ export class CursorContext {
    * Sync multiple sessions from Cursor DB to Metadata DB
    * Only syncs sessions that are new or have been updated since last sync
    */
-  async syncSessions(limit?: number): Promise<number> {
-    // Get all session timestamps from Cursor DB (fast - single query)
+  async syncSessions(limit?: number, source: 'cursor' | 'claude' | 'all' = 'cursor'): Promise<number> {
+    let synced = 0;
+
+    // Sync Cursor sessions
+    if (source === 'cursor' || source === 'all') {
+      synced += await this.syncCursorSessions(limit);
+    }
+
+    // Sync Claude Code sessions
+    if (source === 'claude' || source === 'all') {
+      synced += await this.syncClaudeSessions(limit);
+    }
+
+    // Update last sync time
+    this.lastSyncTime = Date.now();
+
+    return synced;
+  }
+
+  /**
+   * Sync Cursor sessions only
+   */
+  private async syncCursorSessions(limit?: number): Promise<number> {
     const cursorTimestamps = this.cursorDB.getAllSessionTimestamps(limit);
     let synced = 0;
 
     for (const [sessionId, lastUpdatedAt] of cursorTimestamps.entries()) {
-      const existing = this.metadataDB.getSessionMetadata(sessionId);
+      const prefixedId = `cursor:${sessionId}`;
+      const existing = this.metadataDB.getSessionMetadata(prefixedId);
 
-      // Sync if:
-      // 1. Never synced before (no existing metadata), OR
-      // 2. Session was updated since last sync
       const needsSync = !existing ||
                        !existing.last_synced_at ||
                        lastUpdatedAt > existing.last_synced_at;
 
       if (needsSync) {
-        const metadata = await this.syncSession(sessionId);
+        const metadata = await this.syncCursorSession(sessionId);
         if (metadata) {
           synced++;
         }
       }
     }
 
-    // Update last sync time
-    this.lastSyncTime = Date.now();
+    return synced;
+  }
+
+  /**
+   * Sync Claude Code sessions only
+   */
+  private async syncClaudeSessions(limit?: number): Promise<number> {
+    const claudeTimestamps = this.claudeCodeDB.getSessionTimestamps(limit);
+    let synced = 0;
+
+    for (const [sessionId, lastAccessedAt] of claudeTimestamps.entries()) {
+      const prefixedId = `claude:${sessionId}`;
+      const existing = this.metadataDB.getSessionMetadata(prefixedId);
+
+      const needsSync = !existing ||
+                       !existing.last_synced_at ||
+                       lastAccessedAt > existing.last_synced_at;
+
+      if (needsSync) {
+        const metadata = await this.syncClaudeSession(sessionId);
+        if (metadata) {
+          synced++;
+        }
+      }
+    }
 
     return synced;
   }
