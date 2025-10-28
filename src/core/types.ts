@@ -119,6 +119,7 @@ export interface ToolInfo {
  */
 export interface SessionMetadata {
   session_id: string;
+  source?: 'cursor' | 'claude';
   nickname?: string;
   tags?: string[];
   project_path?: string;

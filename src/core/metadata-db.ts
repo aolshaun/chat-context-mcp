@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import type { SessionMetadata, ProjectInfo } from './types.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 export class MetadataDB {
   private dbPath: string;
@@ -66,6 +66,7 @@ export class MetadataDB {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS session_metadata (
           session_id TEXT PRIMARY KEY,
+          source TEXT DEFAULT 'cursor',
           nickname TEXT UNIQUE,
           tags TEXT,
           project_path TEXT,
@@ -78,6 +79,7 @@ export class MetadataDB {
           message_count INTEGER DEFAULT 0
         );
 
+        CREATE INDEX IF NOT EXISTS idx_source ON session_metadata(source);
         CREATE INDEX IF NOT EXISTS idx_nickname ON session_metadata(nickname);
         CREATE INDEX IF NOT EXISTS idx_project_path ON session_metadata(project_path);
         CREATE INDEX IF NOT EXISTS idx_project_name ON session_metadata(project_name);
@@ -89,17 +91,31 @@ export class MetadataDB {
       `);
     }
 
-    // Migration for existing databases: add last_synced_at if missing
-    if (currentVersion === 1) {
+    // Migration from version 1 to version 2: add source column
+    if (currentVersion < 2) {
       const columns = this.db.pragma('table_info(session_metadata)') as Array<{ name: string }>;
-      const hasLastSyncedAt = columns.some(col => col.name === 'last_synced_at');
 
+      // Add last_synced_at if missing (version 1 migration)
+      const hasLastSyncedAt = columns.some(col => col.name === 'last_synced_at');
       if (!hasLastSyncedAt) {
         this.db.exec(`
           ALTER TABLE session_metadata ADD COLUMN last_synced_at INTEGER;
           CREATE INDEX IF NOT EXISTS idx_last_synced_at ON session_metadata(last_synced_at DESC);
         `);
       }
+
+      // Add source column (version 2 migration)
+      const hasSource = columns.some(col => col.name === 'source');
+      if (!hasSource) {
+        this.db.exec(`
+          ALTER TABLE session_metadata ADD COLUMN source TEXT DEFAULT 'cursor';
+          CREATE INDEX IF NOT EXISTS idx_source ON session_metadata(source);
+          UPDATE session_metadata SET source = 'cursor' WHERE source IS NULL;
+        `);
+      }
+
+      // Update schema version
+      this.db.exec(`UPDATE schema_version SET version = ${SCHEMA_VERSION}`);
     }
   }
   
