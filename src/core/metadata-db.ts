@@ -62,11 +62,11 @@ export class MetadataDB {
     const currentVersion = versionRow?.version || 0;
     
     if (currentVersion === 0) {
-      // First time setup
+      // First time setup - create schema v2 (multi-source from the start)
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS session_metadata (
           session_id TEXT PRIMARY KEY,
-          source TEXT DEFAULT 'cursor',
+          source TEXT NOT NULL,
           nickname TEXT UNIQUE,
           tags TEXT,
           project_path TEXT,
@@ -91,11 +91,13 @@ export class MetadataDB {
       `);
     }
 
-    // Migration from version 1 to version 2: add source column
-    if (currentVersion < 2) {
+    // Migration from version 1 to version 2
+    // Note: This migration exists for development only. Production launches with v2.
+    // V1 never had multi-source support, so all v1 sessions are from Cursor.
+    if (currentVersion === 1) {
       const columns = this.db.pragma('table_info(session_metadata)') as Array<{ name: string }>;
 
-      // Add last_synced_at if missing (version 1 migration)
+      // Add last_synced_at if missing
       const hasLastSyncedAt = columns.some(col => col.name === 'last_synced_at');
       if (!hasLastSyncedAt) {
         this.db.exec(`
@@ -104,11 +106,11 @@ export class MetadataDB {
         `);
       }
 
-      // Add source column (version 2 migration)
+      // Add source column (v1 only had Cursor support, so all existing sessions are cursor)
       const hasSource = columns.some(col => col.name === 'source');
       if (!hasSource) {
         this.db.exec(`
-          ALTER TABLE session_metadata ADD COLUMN source TEXT DEFAULT 'cursor';
+          ALTER TABLE session_metadata ADD COLUMN source TEXT NOT NULL DEFAULT 'cursor';
           CREATE INDEX IF NOT EXISTS idx_source ON session_metadata(source);
           UPDATE session_metadata SET source = 'cursor' WHERE source IS NULL;
         `);
@@ -143,9 +145,14 @@ export class MetadataDB {
         message_count = excluded.message_count
     `);
 
+    // Validate that source is provided
+    if (!metadata.source) {
+      throw new Error(`Source is required for session ${metadata.session_id}`);
+    }
+
     stmt.run(
       metadata.session_id,
-      metadata.source || 'cursor',
+      metadata.source,
       metadata.nickname || null,
       metadata.tags ? JSON.stringify(metadata.tags) : null,
       metadata.project_path || null,

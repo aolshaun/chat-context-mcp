@@ -99,11 +99,28 @@ export class CursorDB {
   
   /**
    * List all composer session IDs
+   * Supports both old format (individual keys) and new format (single JSON object)
    */
   listComposerIds(limit?: number): string[] {
     const db = this.connect();
 
     try {
+      // Try new format first (Cursor latest version - single composer.composerData key)
+      const newFormatRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?')
+        .get('composer.composerData') as { value: Buffer } | undefined;
+
+      if (newFormatRow) {
+        const data = JSON.parse(newFormatRow.value.toString('utf8'));
+        if (data.allComposers && Array.isArray(data.allComposers)) {
+          const composerIds = data.allComposers
+            .map((c: any) => c.composerId)
+            .filter(Boolean);
+
+          return limit ? composerIds.slice(0, limit) : composerIds;
+        }
+      }
+
+      // Fallback to old format (individual composerData:{uuid} keys)
       const query = `
         SELECT key
         FROM cursorDiskKV
@@ -127,11 +144,42 @@ export class CursorDB {
   /**
    * Get all sessions with their last updated timestamps (efficient bulk check)
    * Returns map of sessionId -> lastUpdatedAt timestamp (milliseconds since epoch)
+   * Supports both old format (individual keys) and new format (single JSON object)
    */
   getAllSessionTimestamps(limit?: number): Map<string, number> {
     const db = this.connect();
 
     try {
+      const timestamps = new Map<string, number>();
+
+      // Try new format first (Cursor latest version - single composer.composerData key)
+      const newFormatRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?')
+        .get('composer.composerData') as { value: Buffer } | undefined;
+
+      if (newFormatRow) {
+        const data = JSON.parse(newFormatRow.value.toString('utf8'));
+        if (data.allComposers && Array.isArray(data.allComposers)) {
+          // Sort by lastUpdatedAt
+          const sorted = [...data.allComposers]
+            .filter(c => c.composerId)
+            .sort((a, b) => {
+              const aTime = a.lastUpdatedAt || a.createdAt || 0;
+              const bTime = b.lastUpdatedAt || b.createdAt || 0;
+              return bTime - aTime;
+            });
+
+          const limited = limit ? sorted.slice(0, limit) : sorted;
+
+          for (const composer of limited) {
+            const timestamp = composer.lastUpdatedAt || composer.createdAt || 0;
+            timestamps.set(composer.composerId, timestamp);
+          }
+
+          return timestamps;
+        }
+      }
+
+      // Fallback to old format (individual composerData:{uuid} keys)
       const query = `
         SELECT
           key,
@@ -143,8 +191,6 @@ export class CursorDB {
       `;
 
       const rows = db.prepare(query).all() as { key: string; lastUpdatedAt: string | null }[];
-
-      const timestamps = new Map<string, number>();
 
       for (const row of rows) {
         const sessionId = row.key.split(':')[1]!;
@@ -164,23 +210,46 @@ export class CursorDB {
   
   /**
    * Get composer data for a session
+   * Supports both old format (individual keys) and new format (single JSON object)
    */
   getComposerData(composerId: string): ComposerData | null {
     const db = this.connect();
-    
+
     try {
+      // Try new format first (Cursor latest version - single composer.composerData key)
+      const newFormatRow = db.prepare('SELECT value FROM ItemTable WHERE key = ?')
+        .get('composer.composerData') as { value: Buffer } | undefined;
+
+      if (newFormatRow) {
+        const data = JSON.parse(newFormatRow.value.toString('utf8'));
+        if (data.allComposers && Array.isArray(data.allComposers)) {
+          const composer = data.allComposers.find((c: any) => c.composerId === composerId);
+          if (composer) {
+            // Convert new format to ComposerData format
+            return {
+              composerId: composer.composerId,
+              createdAt: new Date(composer.createdAt).toISOString(),
+              lastUpdatedAt: composer.lastUpdatedAt ? new Date(composer.lastUpdatedAt).toISOString() : undefined,
+              name: composer.name,
+              // Add other fields as needed
+            } as ComposerData;
+          }
+        }
+      }
+
+      // Fallback to old format (individual composerData:{uuid} keys)
       const key = `composerData:${composerId}`;
       const row = db.prepare('SELECT value FROM cursorDiskKV WHERE key = ?')
         .get(key) as { value: Buffer } | undefined;
-      
+
       if (!row) {
         return null;
       }
-      
+
       // Parse JSON from buffer
       const jsonStr = row.value.toString('utf-8');
       const data = JSON.parse(jsonStr) as ComposerData;
-      
+
       return data;
     } catch (error) {
       if ((error as Error).message.includes('JSON')) {

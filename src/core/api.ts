@@ -317,45 +317,46 @@ export class CursorContext {
    * Set a nickname for a session
    */
   async setNickname(sessionId: string, nickname: string): Promise<void> {
-    // Determine source from prefix or default to cursor
-    let prefixedId = sessionId;
-    let rawId = sessionId;
-    let source: 'cursor' | 'claude' = 'cursor';
+    let prefixedId: string;
+    let rawId: string;
+    let source: 'cursor' | 'claude';
 
     if (sessionId.includes(':')) {
+      // Session ID has prefix
       [source, rawId] = sessionId.split(':') as ['cursor' | 'claude', string];
       prefixedId = sessionId;
     } else {
-      // No prefix, default to cursor
-      prefixedId = `cursor:${sessionId}`;
-      rawId = sessionId;
-      source = 'cursor';
+      // No prefix - try to find the session in either source
+      // Check Cursor first
+      const cursorData = this.cursorDB.getComposerData(sessionId);
+      const claudeMessages = this.claudeCodeDB.getSessionMessages(sessionId);
+
+      if (cursorData && (!claudeMessages || claudeMessages.length === 0)) {
+        // Found in Cursor only
+        source = 'cursor';
+        rawId = sessionId;
+        prefixedId = `cursor:${sessionId}`;
+      } else if (claudeMessages && claudeMessages.length > 0 && !cursorData) {
+        // Found in Claude only
+        source = 'claude';
+        rawId = sessionId;
+        prefixedId = `claude:${sessionId}`;
+      } else if (cursorData && claudeMessages && claudeMessages.length > 0) {
+        // Found in both - this is a collision, require explicit prefix
+        throw new Error(`Session ID ${sessionId} exists in both Cursor and Claude Code. Please specify the source using prefix: cursor:${sessionId} or claude:${sessionId}`);
+      } else {
+        // Not found in either
+        throw new SessionNotFoundError(sessionId);
+      }
     }
 
-    // Check if session exists in the appropriate DB
-    if (source === 'cursor') {
-      const composerData = this.cursorDB.getComposerData(rawId);
-      if (!composerData) {
-        throw new SessionNotFoundError(sessionId);
-      }
-
-      // If autoSync and no metadata exists, sync first
-      if (this.autoSync) {
-        const existing = this.metadataDB.getSessionMetadata(prefixedId);
-        if (!existing) {
+    // If autoSync and no metadata exists, sync first
+    if (this.autoSync) {
+      const existing = this.metadataDB.getSessionMetadata(prefixedId);
+      if (!existing) {
+        if (source === 'cursor') {
           await this.syncCursorSession(rawId);
-        }
-      }
-    } else if (source === 'claude') {
-      const messages = this.claudeCodeDB.getSessionMessages(rawId);
-      if (!messages || messages.length === 0) {
-        throw new SessionNotFoundError(sessionId);
-      }
-
-      // If autoSync and no metadata exists, sync first
-      if (this.autoSync) {
-        const existing = this.metadataDB.getSessionMetadata(prefixedId);
-        if (!existing) {
+        } else {
           await this.syncClaudeSession(rawId);
         }
       }
@@ -369,45 +370,45 @@ export class CursorContext {
    * Add a tag to a session
    */
   async addTag(sessionId: string, tag: string): Promise<void> {
-    // Determine source from prefix or default to cursor
-    let prefixedId = sessionId;
-    let rawId = sessionId;
-    let source: 'cursor' | 'claude' = 'cursor';
+    let prefixedId: string;
+    let rawId: string;
+    let source: 'cursor' | 'claude';
 
     if (sessionId.includes(':')) {
+      // Session ID has prefix
       [source, rawId] = sessionId.split(':') as ['cursor' | 'claude', string];
       prefixedId = sessionId;
     } else {
-      // No prefix, default to cursor
-      prefixedId = `cursor:${sessionId}`;
-      rawId = sessionId;
-      source = 'cursor';
+      // No prefix - try to find the session in either source
+      const cursorData = this.cursorDB.getComposerData(sessionId);
+      const claudeMessages = this.claudeCodeDB.getSessionMessages(sessionId);
+
+      if (cursorData && (!claudeMessages || claudeMessages.length === 0)) {
+        // Found in Cursor only
+        source = 'cursor';
+        rawId = sessionId;
+        prefixedId = `cursor:${sessionId}`;
+      } else if (claudeMessages && claudeMessages.length > 0 && !cursorData) {
+        // Found in Claude only
+        source = 'claude';
+        rawId = sessionId;
+        prefixedId = `claude:${sessionId}`;
+      } else if (cursorData && claudeMessages && claudeMessages.length > 0) {
+        // Found in both - this is a collision, require explicit prefix
+        throw new Error(`Session ID ${sessionId} exists in both Cursor and Claude Code. Please specify the source using prefix: cursor:${sessionId} or claude:${sessionId}`);
+      } else {
+        // Not found in either
+        throw new SessionNotFoundError(sessionId);
+      }
     }
 
-    // Check if session exists in the appropriate DB
-    if (source === 'cursor') {
-      const composerData = this.cursorDB.getComposerData(rawId);
-      if (!composerData) {
-        throw new SessionNotFoundError(sessionId);
-      }
-
-      // If autoSync and no metadata exists, sync first
-      if (this.autoSync) {
-        const existing = this.metadataDB.getSessionMetadata(prefixedId);
-        if (!existing) {
+    // If autoSync and no metadata exists, sync first
+    if (this.autoSync) {
+      const existing = this.metadataDB.getSessionMetadata(prefixedId);
+      if (!existing) {
+        if (source === 'cursor') {
           await this.syncCursorSession(rawId);
-        }
-      }
-    } else if (source === 'claude') {
-      const messages = this.claudeCodeDB.getSessionMessages(rawId);
-      if (!messages || messages.length === 0) {
-        throw new SessionNotFoundError(sessionId);
-      }
-
-      // If autoSync and no metadata exists, sync first
-      if (this.autoSync) {
-        const existing = this.metadataDB.getSessionMetadata(prefixedId);
-        if (!existing) {
+        } else {
           await this.syncClaudeSession(rawId);
         }
       }
