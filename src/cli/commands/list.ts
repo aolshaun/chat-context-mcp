@@ -20,25 +20,28 @@ export function createListCommand(): Command {
     .option('-s, --sort <type>', 'Sort order (newest, oldest, most_messages)')
     .option('-l, --limit <number>', 'Limit number of results')
     .option('-f, --format <type>', 'Output format (table, compact, json)')
+    .option('--source <source>', 'Filter by source (cursor, claude, all)', 'all')
     .option('--no-color', 'Disable colors')
     .action(async (options: ListOptions) => {
       const spinner = ora('Loading sessions...').start();
-      
+
       try {
         const config = loadConfig();
         const api = new CursorContext();
-        
+
         // Merge config with options
         const limit = options.limit ? parseInt(options.limit.toString(), 10) : config.defaultLimit;
         const sort = options.sort || config.defaultSort;
         const format = options.format || config.defaultFormat;
-        
+        const source = (options.source || 'all') as 'cursor' | 'claude' | 'all';
+
         const sessions = await api.listSessions({
           projectPath: options.project,
           tag: options.tag,
           taggedOnly: options.taggedOnly,
           sortBy: sort as any,
-          limit
+          limit,
+          source
         });
         
         spinner.stop();

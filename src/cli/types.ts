@@ -22,6 +22,7 @@ export interface ListOptions extends GlobalOptions {
   tag?: string;
   taggedOnly?: boolean;
   sort?: 'newest' | 'oldest' | 'most_messages';
+  source?: 'cursor' | 'claude' | 'all';
 }
 
 export interface SearchOptions extends GlobalOptions {
@@ -38,5 +39,6 @@ export interface GetOptions extends GlobalOptions {
 
 export interface SyncOptions {
   limit?: number;
+  source?: 'cursor' | 'claude' | 'all';
 }
 

@@ -87,6 +87,11 @@ USE this for: Retrieving the user's actual saved Cursor chat session data from t
                 enum: ['newest', 'oldest', 'most_messages'],
                 description: 'Sort order (default: newest)',
               },
+              source: {
+                type: 'string',
+                enum: ['cursor', 'claude', 'all'],
+                description: 'Filter by source (cursor, claude, or all) (default: all)',
+              },
             },
           },
         },
@@ -273,7 +278,7 @@ TRIGGER: "What projects have I chatted about?" or "Show my session projects"`,
         },
         {
           name: 'sync_sessions',
-          description: `Sync sessions from Cursor database to the metadata database.
+          description: `Sync sessions from Cursor and/or Claude Code databases to the metadata database.
 
 Use when user wants to:
 - "Sync my sessions"
@@ -281,13 +286,18 @@ Use when user wants to:
 - "Refresh sessions"
 - "Sync the chat sessions"
 
-This will fetch new/updated sessions from Cursor and make them available for querying.`,
+This will fetch new/updated sessions and make them available for querying.`,
           inputSchema: {
             type: 'object',
             properties: {
               limit: {
                 type: 'number',
                 description: 'Maximum number of sessions to sync (default: all sessions)',
+              },
+              source: {
+                type: 'string',
+                enum: ['cursor', 'claude', 'all'],
+                description: 'Source to sync from (cursor, claude, or all) (default: all)',
               },
               project: {
                 type: 'string',

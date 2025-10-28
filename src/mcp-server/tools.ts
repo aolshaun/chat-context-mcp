@@ -16,6 +16,7 @@ export async function handleListSessions(api: CursorContext, args: any) {
     tag: args.tag,
     taggedOnly: args.taggedOnly || false,
     sortBy: args.sort || 'newest',
+    source: (args.source || 'all') as 'cursor' | 'claude' | 'all',
   });
 
   // Format as readable text
@@ -280,19 +281,26 @@ export async function handleListProjects(api: CursorContext) {
 }
 
 /**
- * Sync sessions from Cursor DB to Metadata DB
+ * Sync sessions from Cursor DB and/or Claude Code to Metadata DB
  */
 export async function handleSyncSessions(api: CursorContext, args: any) {
   const limit = args.limit || undefined; // undefined = sync all
-  
-  const synced = await api.syncSessions(limit);
+  const source = (args.source || 'all') as 'cursor' | 'claude' | 'all';
+
+  const sourceLabel = source === 'all'
+    ? 'Cursor and Claude Code'
+    : source === 'cursor'
+      ? 'Cursor'
+      : 'Claude Code';
+
+  const synced = await api.syncSessions(limit, source);
   const stats = api.getStats();
-  
+
   return {
     content: [
       {
         type: 'text',
-        text: `✅ Synced ${synced} session(s)
+        text: `✅ Synced ${synced} session(s) from ${sourceLabel}
 
 📊 Current Stats:
    Total sessions in Cursor: ${stats.totalSessionsInCursor || 0}
