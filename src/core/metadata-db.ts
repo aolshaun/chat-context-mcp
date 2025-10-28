@@ -127,10 +127,11 @@ export class MetadataDB {
 
     const stmt = db.prepare(`
       INSERT INTO session_metadata (
-        session_id, nickname, tags, project_path, project_name, has_project,
+        session_id, source, nickname, tags, project_path, project_name, has_project,
         created_at, last_accessed, last_synced_at, first_message_preview, message_count
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET
+        source = excluded.source,
         nickname = excluded.nickname,
         tags = excluded.tags,
         project_path = excluded.project_path,
@@ -144,6 +145,7 @@ export class MetadataDB {
 
     stmt.run(
       metadata.session_id,
+      metadata.source || 'cursor',
       metadata.nickname || null,
       metadata.tags ? JSON.stringify(metadata.tags) : null,
       metadata.project_path || null,
@@ -179,6 +181,7 @@ export class MetadataDB {
   private rowToMetadata(row: any): SessionMetadata {
     return {
       session_id: row.session_id,
+      source: row.source as 'cursor' | 'claude' | undefined,
       nickname: row.nickname || undefined,
       tags: row.tags ? JSON.parse(row.tags) : undefined,
       project_path: row.project_path || undefined,
