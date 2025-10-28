@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "cursor-context": {
+      "command": "node",
+      "args": [
+        "/Users/macbook/play/chat-context-mcp/dist/mcp-server/index.js"
+      ],
+      "env": {}
+    }
+  }
+}
+
